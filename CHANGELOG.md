@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-01-07
+
+### Changed
+- Relaxed `pydantic` dependency to `>=2.10.0,<3.0.0` to support more environments.
+
 ## [0.1.0] - 2026-01-07
 
 ### Added

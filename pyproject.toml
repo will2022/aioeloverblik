@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aioeloverblik"
-version = "0.1.0"
+version = "0.1.1"
 description = "Async Python wrapper for Eloverblik.dk API (Customer & ThirdParty)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,7 +24,7 @@ classifiers = [
 ]
 dependencies = [
   "httpx>=0.28.1",
-  "pydantic>=2.12.5",
+  "pydantic>=2.10.0,<3.0.0",
 ]
 
 [project.urls]
