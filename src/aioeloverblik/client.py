@@ -10,18 +10,28 @@ from pydantic import TypeAdapter
 
 from .exceptions import AuthenticationError, EloverblikError, RateLimitError, ServerError
 from .models import (
-    Authorization,
+    ApiResponse,
+    AuthorizationDto,
     MeteringPoint,
     MeteringPointCharges,
     MeteringPointDetail,
+    MeteringPointThirdParty,
     MyEnergyDataMarketDocument,
 )
 
 logger = logging.getLogger(__name__)
 
 
+Aggregation = Literal["Actual", "Quarter", "Hour", "Day", "Month", "Year"]
+
+
 class BaseClient:
-    """Base client handling authentication and common HTTP operations."""
+    """Base client handling authentication and common HTTP operations.
+
+    Args:
+        refresh_token: The refresh token used to obtain access tokens.
+        timeout: HTTP request timeout in seconds.
+    """
 
     BASE_URL = "https://api.eloverblik.dk"
 
@@ -32,6 +42,7 @@ class BaseClient:
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def close(self):
+        """Close the underlying HTTP client."""
         await self._client.aclose()
 
     async def __aenter__(self):
@@ -139,30 +150,55 @@ class EloverblikClient(BaseClient):
         return data
 
     async def get_metering_points(self, include_all: bool = False) -> list[MeteringPoint]:
+        """Get metering points for the authenticated user.
+
+        Args:
+            include_all: If True, merges actively linked metering points with non-linked
+                metering points found in DataHub (via CPR/CVR lookup).
+        """
         endpoint = f"/customerapi/api/meteringpoints/meteringpoints?includeAll={str(include_all).lower()}"
         data = await self._request("GET", endpoint)
         raw_list = data.get("result", [])
         return TypeAdapter(list[MeteringPoint]).validate_python(raw_list)
 
     async def add_relation(self, metering_point_id: str, web_access_code: str) -> bool:
-        """Add relation using Web Access Code."""
+        """Add relation using Web Access Code.
+
+        Args:
+            metering_point_id: The ID of the metering point.
+            web_access_code: The web access code provided by the data owner.
+        """
         endpoint = f"/customerapi/api/meteringpoints/meteringpoint/relation/add/{metering_point_id}/{web_access_code}"
         data = await self._request("PUT", endpoint)
         return data.get("result", "") == "Success"
 
-    async def add_relations_by_cvr(self, metering_point_ids: list[str]) -> list[str]:
-        """Add relations for metering points registered to the authenticated CPR/CVR."""
+    async def add_relations_by_cvr(self, metering_point_ids: list[str]) -> list[ApiResponse[str]]:
+        """Add relations for metering points registered to the authenticated CPR/CVR.
+
+        Args:
+            metering_point_ids: List of metering point IDs to add relations for.
+        """
         endpoint = "/customerapi/api/meteringpoints/meteringpoint/relation/add"
         payload = {"meteringPoints": {"meteringPoint": metering_point_ids}}
         data = await self._request("POST", endpoint, json=payload)
-        return TypeAdapter(list[str]).validate_python(data.get("result", []))
+        return TypeAdapter(list[ApiResponse[str]]).validate_python(data.get("result", []))
 
     async def delete_relation(self, metering_point_id: str) -> bool:
+        """Delete relation to a metering point.
+
+        Args:
+            metering_point_id: The ID of the metering point.
+        """
         endpoint = f"/customerapi/api/meteringpoints/meteringpoint/relation/{metering_point_id}"
         data = await self._request("DELETE", endpoint)
-        return data.get("success", False)
+        return data.get("result", False)
 
     async def get_details(self, metering_point_ids: list[str]) -> list[MeteringPointDetail]:
+        """Get detailed information for specified metering points.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+        """
         endpoint = "/customerapi/api/meteringpoints/meteringpoint/getdetails"
         payload = {"meteringPoints": {"meteringPoint": metering_point_ids}}
 
@@ -177,6 +213,13 @@ class EloverblikClient(BaseClient):
         return TypeAdapter(list[MeteringPointDetail]).validate_python(results)
 
     async def get_charges(self, metering_point_ids: list[str]) -> list[MeteringPointCharges]:
+        """Get charges (subscriptions, tariffs, fees) for specified metering points.
+
+        Returns charges linked now or in the future. History of charge changes is not included.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+        """
         endpoint = "/customerapi/api/meteringpoints/meteringpoint/getcharges"
         payload = {"meteringPoints": {"meteringPoint": metering_point_ids}}
 
@@ -191,13 +234,21 @@ class EloverblikClient(BaseClient):
         return TypeAdapter(list[MeteringPointCharges]).validate_python(results)
 
     async def export_metering_points(self, metering_point_ids: list[str]) -> str:
-        """Returns CSV string of metering points."""
+        """Returns CSV string of metering points.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+        """
         endpoint = "/customerapi/api/meteringpoints/masterdata/export"
         payload = {"meteringPoints": {"meteringPoint": metering_point_ids}}
         return await self._request("POST", endpoint, json=payload)
 
     async def export_charges(self, metering_point_ids: list[str]) -> str:
-        """Returns CSV string of charges."""
+        """Returns CSV string of charges.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+        """
         endpoint = "/customerapi/api/meteringpoints/charges/export"
         payload = {"meteringPoints": {"meteringPoint": metering_point_ids}}
         return await self._request("POST", endpoint, json=payload)
@@ -207,9 +258,16 @@ class EloverblikClient(BaseClient):
         metering_point_ids: list[str],
         from_date: date,
         to_date: date,
-        aggregation: str = "Hour",
+        aggregation: Aggregation = "Hour",
     ) -> str:
-        """Returns CSV/Excel export of time series."""
+        """Returns CSV/Excel export of time series.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+            from_date: Start date.
+            to_date: End date.
+            aggregation: Resolution. Values: 'Actual', 'Quarter', 'Hour', 'Day', 'Month', 'Year'.
+        """
         fmt_from = from_date.strftime("%Y-%m-%d")
         fmt_to = to_date.strftime("%Y-%m-%d")
         endpoint = f"/customerapi/api/meterdata/timeseries/export/{fmt_from}/{fmt_to}/{aggregation}"
@@ -221,11 +279,17 @@ class EloverblikClient(BaseClient):
         metering_point_ids: list[str],
         from_date: date,
         to_date: date,
-        aggregation: str = "Hour",
+        aggregation: Aggregation = "Hour",
     ) -> list[MyEnergyDataMarketDocument]:
-        """
-        Get time series data.
-        Aggregation: 'Actual', 'Quarter', 'Hour', 'Day', 'Month', 'Year'
+        """Get time series data.
+
+        Data is only available for the previous 5 years plus the current year.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+            from_date: Start date.
+            to_date: End date.
+            aggregation: Resolution. Values: 'Actual', 'Quarter', 'Hour', 'Day', 'Month', 'Year'.
         """
         fmt_from = from_date.strftime("%Y-%m-%d")
         fmt_to = to_date.strftime("%Y-%m-%d")
@@ -251,44 +315,49 @@ class EloverblikThirdPartyClient(BaseClient):
     TOKEN_ENDPOINT = "/thirdpartyapi/api/token"
 
     async def is_alive(self) -> bool:
+        """Checks if the Third Party API is operating normally."""
         endpoint = "/thirdpartyapi/api/isalive"
         data = await self._request("GET", endpoint)
         return data
 
-    async def get_authorizations(self) -> list[Authorization]:
+    async def get_authorizations(self) -> list[AuthorizationDto]:
+        """Get list of active authorizations (powers of attorney) granted by customers.
+
+        Expired or deleted authorizations are not returned.
+        """
         endpoint = "/thirdpartyapi/api/authorization/authorizations"
         data = await self._request("GET", endpoint)
 
         raw_list = data.get("result", [])
-        return TypeAdapter(list[Authorization]).validate_python(raw_list)
+        return TypeAdapter(list[AuthorizationDto]).validate_python(raw_list)
 
     async def get_metering_points(
         self,
         scope: Literal["authorizationId", "customerCVR", "customerKey"],
         identifier: str,
-    ) -> list[MeteringPoint]:
-        """
-        Get metering points with a specific scope.
+    ) -> list[MeteringPointThirdParty]:
+        """Get metering points with a specific scope.
 
-        :param scope: 'authorizationId', 'customerCVR', or 'customerKey'
-        :param identifier: The ID/CVR/Key value
+        Args:
+            scope: 'authorizationId', 'customerCVR', or 'customerKey'
+            identifier: The ID/CVR/Key value
         """
         endpoint = f"/thirdpartyapi/api/authorization/authorization/meteringpoints/{scope}/{identifier}"
         data = await self._request("GET", endpoint)
 
         raw_list = data.get("result", [])
-        return TypeAdapter(list[MeteringPoint]).validate_python(raw_list)
+        return TypeAdapter(list[MeteringPointThirdParty]).validate_python(raw_list)
 
     async def get_metering_point_ids(
         self,
         scope: Literal["authorizationId", "customerCVR", "customerKey"],
         identifier: str,
     ) -> list[str]:
-        """
-        Get just the list of metering point IDs for a specific scope.
+        """Get just the list of metering point IDs for a specific scope.
 
-        :param scope: 'authorizationId', 'customerCVR', or 'customerKey'
-        :param identifier: The ID/CVR/Key value
+        Args:
+            scope: 'authorizationId', 'customerCVR', or 'customerKey'
+            identifier: The ID/CVR/Key value
         """
         endpoint = f"/thirdpartyapi/api/authorization/authorization/meteringpointids/{scope}/{identifier}"
         data = await self._request("GET", endpoint)
@@ -296,6 +365,11 @@ class EloverblikThirdPartyClient(BaseClient):
         return TypeAdapter(list[str]).validate_python(list_obj)
 
     async def get_details(self, metering_point_ids: list[str]) -> list[MeteringPointDetail]:
+        """Get detailed information for specified metering points.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+        """
         endpoint = "/thirdpartyapi/api/meteringpoint/getdetails"
         payload = {"meteringPoints": {"meteringPoint": metering_point_ids}}
 
@@ -310,6 +384,13 @@ class EloverblikThirdPartyClient(BaseClient):
         return TypeAdapter(list[MeteringPointDetail]).validate_python(results)
 
     async def get_charges(self, metering_point_ids: list[str]) -> list[MeteringPointCharges]:
+        """Get charges (subscriptions, tariffs, fees) for specified metering points.
+
+        Returns charges linked now or in the future. History of charge changes is not included.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+        """
         endpoint = "/thirdpartyapi/api/meteringpoint/getcharges"
         payload = {"meteringPoints": {"meteringPoint": metering_point_ids}}
 
@@ -328,8 +409,18 @@ class EloverblikThirdPartyClient(BaseClient):
         metering_point_ids: list[str],
         from_date: date,
         to_date: date,
-        aggregation: str = "Hour",
+        aggregation: Aggregation = "Hour",
     ) -> list[MyEnergyDataMarketDocument]:
+        """Get time series data.
+
+        Data is only available for the previous 5 years plus the current year.
+
+        Args:
+            metering_point_ids: List of metering point IDs.
+            from_date: Start date.
+            to_date: End date.
+            aggregation: Resolution. Values: 'Actual', 'Quarter', 'Hour', 'Day', 'Month', 'Year'.
+        """
         fmt_from = from_date.strftime("%Y-%m-%d")
         fmt_to = to_date.strftime("%Y-%m-%d")
         endpoint = f"/thirdpartyapi/api/meterdata/gettimeseries/{fmt_from}/{fmt_to}/{aggregation}"
